@@ -32,6 +32,11 @@ function NavBar() {
                 Members
               </Link>
             </li>
+             <li className="nav-item">
+              <Link className="nav-link" to="/barrow">
+                  Borrowing And Returning
+              </Link>
+            </li>
           </ul>
         </div>
       </div>

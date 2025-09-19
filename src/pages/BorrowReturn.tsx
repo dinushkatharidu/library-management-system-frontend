@@ -2,45 +2,69 @@ import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 
 const API = "http://localhost:8080";
+const BORROW_API = `${API}/borrow`; // matches @RequestMapping("/borrow") in backend
 
 type Member = { id: number; name: string };
 type Book = { id: number; title: string; quantity: number };
-type Loan = {
+
+// Aligning name with backend 'Borrowing' entity (previously named Loan)
+type Borrowing = {
   id: number;
   member: Member;
   book: Book;
-  borrowedAt: string; // LocalDate string
-  dueAt: string;      // LocalDate string
+  borrowedAt: string;
+  dueAt: string;
   returnedAt?: string | null;
   fineCents: number;
 };
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (axios.isAxiosError(error)) {
+    const data = error.response?.data;
+    if (typeof data === "string") return data;
+    if (data && typeof data === "object" && "message" in data) {
+      const msg = (data as { message?: unknown }).message;
+      if (typeof msg === "string" && msg.trim().length > 0) return msg;
+    }
+    return error.message || fallback;
+  }
+  if (error instanceof Error) return error.message || fallback;
+  return fallback;
+}
 
 function BorrowReturn() {
   const [members, setMembers] = useState<Member[]>([]);
   const [books, setBooks] = useState<Book[]>([]);
   const [selectedMemberId, setSelectedMemberId] = useState<number | "">("");
   const [mode, setMode] = useState<"borrow" | "return">("borrow");
-
-  const [activeLoans, setActiveLoans] = useState<Loan[]>([]);
+  const [activeBorrowings, setActiveBorrowings] = useState<Borrowing[]>([]);
   const [selectedBookId, setSelectedBookId] = useState<number | "">("");
   const [message, setMessage] = useState<string>("");
 
+  // Initial data load
   useEffect(() => {
     axios.get<Member[]>(`${API}/members`).then((r) => setMembers(r.data));
     axios.get<Book[]>(`${API}/books`).then((r) => setBooks(r.data));
   }, []);
 
+  // Load active borrowings when member or mode changes
   useEffect(() => {
     setMessage("");
     setSelectedBookId("");
     if (selectedMemberId !== "") {
       axios
-        .get<Loan[]>(`${API}/loans/active`, {
+        .get<Borrowing[]>(`${BORROW_API}/active`, {
           params: { memberId: selectedMemberId },
         })
-        .then((r) => setActiveLoans(r.data));
+        .then((r) => setActiveBorrowings(r.data))
+        .catch((error: unknown) => {
+          setMessage(
+            getErrorMessage(error, "Failed to load active borrowings.")
+          );
+          setActiveBorrowings([]);
+        });
     } else {
-      setActiveLoans([]);
+      setActiveBorrowings([]);
     }
   }, [selectedMemberId, mode]);
 
@@ -50,57 +74,58 @@ function BorrowReturn() {
   );
 
   const canBorrow = useMemo(
-    () => selectedMemberId !== "" && activeLoans.length < 2 && selectedBookId !== "",
-    [selectedMemberId, activeLoans.length, selectedBookId]
+    () =>
+      selectedMemberId !== "" &&
+      activeBorrowings.length < 2 &&
+      selectedBookId !== "",
+    [selectedMemberId, activeBorrowings.length, selectedBookId]
   );
+
+  const refreshAfterChange = async (memberId: number | "") => {
+    if (memberId === "") return;
+    const [booksRes, borrowingsRes] = await Promise.all([
+      axios.get<Book[]>(`${API}/books`),
+      axios.get<Borrowing[]>(`${BORROW_API}/active`, {
+        params: { memberId },
+      }),
+    ]);
+    setBooks(booksRes.data);
+    setActiveBorrowings(borrowingsRes.data);
+  };
 
   const handleBorrow = async () => {
     if (!canBorrow || selectedMemberId === "" || selectedBookId === "") return;
     setMessage("");
     try {
-      const res = await axios.post<Loan>(`${API}/loans/borrow`, {
+      const res = await axios.post<Borrowing>(`${BORROW_API}/borrow`, {
         memberId: selectedMemberId,
         bookId: selectedBookId,
       });
       setMessage(
         `Borrowed "${res.data.book.title}". Due on ${res.data.dueAt}.`
       );
-      // Refresh stock and active loans
-      const [booksRes, loansRes] = await Promise.all([
-        axios.get<Book[]>(`${API}/books`),
-        axios.get<Loan[]>(`${API}/loans/active`, {
-          params: { memberId: selectedMemberId },
-        }),
-      ]);
-      setBooks(booksRes.data);
-      setActiveLoans(loansRes.data);
+      await refreshAfterChange(selectedMemberId);
       setSelectedBookId("");
-    } catch (e: any) {
-      setMessage(e?.response?.data || "Borrow failed.");
+    } catch (error: unknown) {
+      setMessage(getErrorMessage(error, "Borrow failed."));
     }
   };
 
-  const handleReturn = async (loanId: number) => {
+  const handleReturn = async (borrowingId: number) => {
     setMessage("");
     try {
-      const res = await axios.post<Loan>(`${API}/loans/${loanId}/return`);
+      const res = await axios.post<Borrowing>(
+        `${BORROW_API}/${borrowingId}/return`
+      );
       const fine = (res.data.fineCents ?? 0) / 100;
       setMessage(
         fine > 0
           ? `Returned "${res.data.book.title}". Fine: ${fine.toFixed(2)}`
           : `Returned "${res.data.book.title}". No fine.`
       );
-      // Refresh lists
-      const [booksRes, loansRes] = await Promise.all([
-        axios.get<Book[]>(`${API}/books`),
-        axios.get<Loan[]>(`${API}/loans/active`, {
-          params: { memberId: selectedMemberId },
-        }),
-      ]);
-      setBooks(booksRes.data);
-      setActiveLoans(loansRes.data);
-    } catch (e: any) {
-      setMessage(e?.response?.data || "Return failed.");
+      await refreshAfterChange(selectedMemberId);
+    } catch (error: unknown) {
+      setMessage(getErrorMessage(error, "Return failed."));
     }
   };
 
@@ -116,7 +141,9 @@ function BorrowReturn() {
               className="form-select"
               value={selectedMemberId}
               onChange={(e) =>
-                setSelectedMemberId(e.target.value ? Number(e.target.value) : "")
+                setSelectedMemberId(
+                  e.target.value ? Number(e.target.value) : ""
+                )
               }
             >
               <option value="">-- choose member --</option>
@@ -169,8 +196,8 @@ function BorrowReturn() {
       {mode === "borrow" ? (
         <div className="card p-3">
           <div className="mb-2">
-            Active loans: {activeLoans.length} / 2
-            {activeLoans.length >= 2 && (
+            Active borrowings: {activeBorrowings.length} / 2
+            {activeBorrowings.length >= 2 && (
               <span className="text-danger ms-2">Limit reached</span>
             )}
           </div>
@@ -182,9 +209,13 @@ function BorrowReturn() {
                 className="form-select"
                 value={selectedBookId}
                 onChange={(e) =>
-                  setSelectedBookId(e.target.value ? Number(e.target.value) : "")
+                  setSelectedBookId(
+                    e.target.value ? Number(e.target.value) : ""
+                  )
                 }
-                disabled={selectedMemberId === "" || activeLoans.length >= 2}
+                disabled={
+                  selectedMemberId === "" || activeBorrowings.length >= 2
+                }
               >
                 <option value="">-- choose book --</option>
                 {availableBooks.map((b) => (
@@ -207,11 +238,11 @@ function BorrowReturn() {
         </div>
       ) : (
         <div className="card p-3">
-          <h5 className="mb-3">Active Loans</h5>
+          <h5 className="mb-3">Active Borrowings</h5>
           {selectedMemberId === "" ? (
-            <div className="text-muted">Select a member to see loans.</div>
-          ) : activeLoans.length === 0 ? (
-            <div className="text-muted">No active loans.</div>
+            <div className="text-muted">Select a member to see borrowings.</div>
+          ) : activeBorrowings.length === 0 ? (
+            <div className="text-muted">No active borrowings.</div>
           ) : (
             <div className="table-responsive">
               <table className="table table-sm align-middle">
@@ -224,15 +255,15 @@ function BorrowReturn() {
                   </tr>
                 </thead>
                 <tbody>
-                  {activeLoans.map((loan) => (
-                    <tr key={loan.id}>
-                      <td>{loan.book.title}</td>
-                      <td>{loan.borrowedAt}</td>
-                      <td>{loan.dueAt}</td>
+                  {activeBorrowings.map((br) => (
+                    <tr key={br.id}>
+                      <td>{br.book.title}</td>
+                      <td>{br.borrowedAt}</td>
+                      <td>{br.dueAt}</td>
                       <td>
                         <button
                           className="btn btn-success btn-sm"
-                          onClick={() => handleReturn(loan.id)}
+                          onClick={() => handleReturn(br.id)}
                         >
                           Return
                         </button>
